@@ -363,25 +363,24 @@ static double l1_f32_neon(const void *pVect1v, const void *pVect2v,
 
 static f32 cosine_float_wasm_simd(const void *pVect1v, const void *pVect2v,
                                   const void *qty_ptr) {
-  f32 *pVect1 = (f32 *)pVect1v;
-  f32 *pVect2 = (f32 *)pVect2v;
   size_t qty = *((size_t *)qty_ptr);
-
   v128_t vsum11 = wasm_f32x4_const_splat(0.0f);
   v128_t vsum22 = wasm_f32x4_const_splat(0.0f);
   v128_t vsum12 = wasm_f32x4_const_splat(0.0f);
   if (qty % 4) {
-    // Handle non-multiple of 4 elements.
+    // The number of elements is not a multiple of 4. Handle the extra
+    // elements at the end of the input arrays.
     const int nExtra = qty % 4;
-    const f32 *pVect1 = pVect1 + qty - nExtra;
-    const f32 *pVect2 = pVect2 + qty - nExtra;
+    qty -= nExtra;
+    const f32 *pFloat1 = (const f32*)pVect1v + qty;
+    const f32 *pFloat2 = (const f32*)pVect2v + qty;
 
     f32 t11 = 0.0f;
     f32 t22 = 0.0f;
     f32 t12 = 0.0f;
     for (int i = 0; i < nExtra; i++) {
-      f32 v1 = *pVect1++;
-      f32 v2 = *pVect2++;
+      f32 v1 = *pFloat1++;
+      f32 v2 = *pFloat2++;
       t11 += v1 * v1;
       t22 += v2 * v2;
       t12 += v1 * v2;
@@ -389,16 +388,16 @@ static f32 cosine_float_wasm_simd(const void *pVect1v, const void *pVect2v,
     vsum11 = wasm_f32x4_splat(t11 * 0.25f);
     vsum22 = wasm_f32x4_splat(t22 * 0.25f);
     vsum12 = wasm_f32x4_splat(t12 * 0.25f);
-
-    qty -= nExtra;
   }
 
+  v128_t *pVect1 = (v128_t *)pVect1v;
+  v128_t *pVect2 = (v128_t *)pVect2v;
   for (size_t i = 0; i < qty; i += 4) {
     // Load 4 components from each vector.
-    v128_t v1 = wasm_v128_load(pVect1);
-    v128_t v2 = wasm_v128_load(pVect2);
+    v128_t v1 = wasm_v128_load(pVect1++);
+    v128_t v2 = wasm_v128_load(pVect2++);
 
-    // Multiply the components of each vector with itself each other.
+    // Multiply the components of each vector by itself and each other.
     v128_t t11 = wasm_f32x4_mul(v1, v1);
     v128_t t22 = wasm_f32x4_mul(v2, v2);
     v128_t t12 = wasm_f32x4_mul(v1, v2);
@@ -407,28 +406,27 @@ static f32 cosine_float_wasm_simd(const void *pVect1v, const void *pVect2v,
     vsum11 = wasm_f32x4_add(vsum11, t11);
     vsum22 = wasm_f32x4_add(vsum22, t22);
     vsum12 = wasm_f32x4_add(vsum12, t12);
-
-    pVect1 += 4;
-    pVect2 += 4;
   }
 
-  // Sum lanes 0 + 2 => 0, 1 + 3 => 1.
+  // Now we need to sum all the lanes of each accumulator. For the squared
+  // values first we reduce from 4 lanes to 2 lanes.
   vsum11 = wasm_f32x4_add(vsum11, wasm_i32x4_shuffle(vsum11, vsum11, 2, 3, 0, 1));
   vsum22 = wasm_f32x4_add(vsum22, wasm_i32x4_shuffle(vsum22, vsum22, 2, 3, 0, 1));
 
-  // Combine into a single vector.
+  // Now combine the two lanes from each accumulator into a single SIMD
+  // variable.
   v128_t tsq = wasm_i32x4_shuffle(vsum11, vsum22, 0, 4, 1, 5);
 
-  // Sum across lanes again. After this lane 0 will hold the sum of the squares
-  // of the components of the first vector, and lane 1 will hold the sum of the
-  // squares of the components of the second vector.
+  // Reduce from 4 lanes to 2 lanes again. After this lane 0 will hold
+  // the sum of the squares of the components of the first vector, and
+  // lane 1 will hold the sum of the squares of the components of the
+  // second vector.
   tsq = wasm_f32x4_add(tsq, wasm_i32x4_shuffle(tsq, tsq, 2, 3, 0, 1));
 
   // Compute square roots of the sums of squares.
   tsq = wasm_f32x4_sqrt(tsq);
 
-  // Sum the products of the components of the two vectors. For this
-  // computation we only use SIMD addition once.  
+  // For the remaining accumulator, we do one SIMD add and one scalar add.
   vsum12 = wasm_f32x4_add(vsum12, wasm_i32x4_shuffle(vsum12, vsum12, 2, 3, 0, 1));
   f32 sum12 = wasm_f32x4_extract_lane(vsum12, 0) + wasm_f32x4_extract_lane(vsum12, 1);
 
@@ -436,7 +434,6 @@ static f32 cosine_float_wasm_simd(const void *pVect1v, const void *pVect2v,
   f32 similarity = sum12 / (wasm_f32x4_extract_lane(tsq, 0) * wasm_f32x4_extract_lane(tsq, 1));
   return 1.0f - similarity;
 }
-
 #endif // SQLITE_VEC_ENABLE_WASM_SIMD
 
 static f32 l2_sqr_float(const void *pVect1v, const void *pVect2v,
